@@ -19,9 +19,9 @@
 // Configuration
 #define DEBUG_PORT Serial
 #define MIDI_PORT Serial
-#define DEBUG_BPS 38400       // Baud rate in debug mode
-#define MIDI_BPS 31250        // Baud rate in MIDI mode
-#define CAP_SAMPLES 30        // How many samples to take per key per check
+#define DEBUG_BPS 115200      // Baud rate in debug mode
+#define MIDI_BPS 115200       // Baud rate in MIDI mode (31250 if real MIDI)
+#define CAP_SAMPLES 100        // How many samples to take per key per check (30)
 #define INTERVAL 100          // Execute main loop this often (ms)
 #define AIR_PIN 14            // Pin for air flow sensor (A0)
 #define AIR_MULTIPLIER 0.5f   // Multiply air flow value (to map to midi velocity)
@@ -37,10 +37,13 @@
 #define RECV_PIN5 8
 #define RECV_PIN6 9
 #define RECV_PIN7 10
-#define KEY_TRESHOLD 100      // Values over this are considered a touching of sensor
-#define DEBUG 1               // Define when wanting to debug
-#undef MIDI                   // Define when wanting to use as midi device
+#define KEY_TRESHOLD 10       // Values over this are considered a touching of sensor
+#define DEBUG 0               // Define when wanting to debug
+//#define MIDI 1                // Define when wanting to use as midi device
+#define EMULATE_AIR 1         // Always full velocity (no air sensor, but test the keys)
 #define NOTES 12              // How many key combinations (notes) are available
+#define CHANNEL 3             // MIDI channel to use (1 to 16)
+
 const unsigned char note_keys[NOTES] =
   {
   0b11111111, // Low C
@@ -60,14 +63,8 @@ const unsigned char note_values[NOTES] =
   {60, 62, 64, 77, 78, 79, 81, 82, 83, 72, 74, 76};
 
 // Array of the holes/keys/sensors which simulate holes on a real flute
-CapacitiveSensor key0 = CapacitiveSensor(SEND_PIN, RECV_PIN0);
-CapacitiveSensor key1 = CapacitiveSensor(SEND_PIN, RECV_PIN1);
-CapacitiveSensor key2 = CapacitiveSensor(SEND_PIN, RECV_PIN2);
-CapacitiveSensor key3 = CapacitiveSensor(SEND_PIN, RECV_PIN3);
-CapacitiveSensor key4 = CapacitiveSensor(SEND_PIN, RECV_PIN4);
-CapacitiveSensor key5 = CapacitiveSensor(SEND_PIN, RECV_PIN5);
-CapacitiveSensor key6 = CapacitiveSensor(SEND_PIN, RECV_PIN6);
-CapacitiveSensor key7 = CapacitiveSensor(SEND_PIN, RECV_PIN7);
+const unsigned char recv_pins[KEYS] = {RECV_PIN0, RECV_PIN1, RECV_PIN2, RECV_PIN3, RECV_PIN4, RECV_PIN5, RECV_PIN6, RECV_PIN7};
+CapacitiveSensor *keys[KEYS];
 bool key_touched[KEYS];
 
 // Some global variables
@@ -92,6 +89,7 @@ void setup()
   for (unsigned char i=0; i<KEYS; i++)
   {
     key_touched[i] = false;
+    keys[i] = new CapacitiveSensor(SEND_PIN, recv_pins[i]);
     //keys[i]->set_CS_AutocaL_Millis(0xFFFFFFFF); // autocalibrate off
   }
   old_air = analogRead(AIR_PIN);
@@ -108,19 +106,8 @@ void loop()
   for (unsigned char i=0; i<KEYS; i++)
   {
     long key_value = 0;
-    switch(i)
-    {
-      case 0: key_value = key0.capacitiveSensor(CAP_SAMPLES); break;
-      case 1: key_value = key1.capacitiveSensor(CAP_SAMPLES); break;
-      case 2: key_value = key2.capacitiveSensor(CAP_SAMPLES); break;
-      case 3: key_value = key3.capacitiveSensor(CAP_SAMPLES); break;
-      case 4: key_value = key4.capacitiveSensor(CAP_SAMPLES); break;
-      case 5: key_value = key5.capacitiveSensor(CAP_SAMPLES); break;
-      case 6: key_value = key6.capacitiveSensor(CAP_SAMPLES); break;
-      case 7: key_value = key7.capacitiveSensor(CAP_SAMPLES); break;
-      default: break;
-    }
-    bool touched = (key_value >= KEY_TRESHOLD);
+    key_value = keys[i]->capacitiveSensor(CAP_SAMPLES);
+    bool touched = (key_value > KEY_TRESHOLD);
     if (touched != key_touched[i])
     {
       keys_changed = true;
@@ -131,13 +118,19 @@ void loop()
   }
   log(msg);
 
-  // Determine if air is flowing (0 to 255) and if the value changed
-  // over a treshold.
+  // Calculate value of air flowing, mapping it to MIDI velocity range
+  // (0-127)
   float air_value = (float)analogRead(AIR_PIN);
-  msg = "Air: " + (int)air_value;
-  log(msg);
   air_value = air_value * AIR_MULTIPLIER + AIR_OFFSET;
   if (air_value < 0) air_value = 0;
+  if (air_value > 127) air_value = 127;
+  
+  msg = "Air: ";
+  msg = msg + air_value;
+  log(msg);
+
+  // Determine if the air value changed significantly enough to generate
+  // a new MIDI message
   bool air_changed = false;
   if (abs(air_value-old_air)>AIR_TRESHOLD)
   {
@@ -156,8 +149,9 @@ void loop()
   {
     if (note_keys[i] == keys_value)
     {
-      note_value = keys_value;
-      String msg = "Key combination" + keys_value;
+      note_value = note_values[i];
+      String msg = "Key combination";
+      msg = msg + keys_value;
       msg = msg + " matched to note ";
       msg = msg + note_value;
       log(msg);
@@ -165,18 +159,37 @@ void loop()
     }
   }
 
-  // Generate a note update on channel 1 if air value changed enough
+  // Generate a note update on MIDI channel 1 if air value changed enough
   // or the keys have changed and are detected to be a note.
+#ifdef MIDI
   if ((air_changed || keys_changed))
   {
     log("Sending note");
-    MIDI_PORT.write(0x90);
-    MIDI_PORT.write(note_value);
-    // No velocity if no note
+    
     unsigned char velocity = (unsigned char)air_value;
+    
+    // If we have no air sensor, emulate full velocity
+#ifdef EMULATE_AIR
+      velocity = 127;
+#endif
+
+    // No velocity if no note
     if (note_value == 0) velocity = 0;
-    MIDI_PORT.write(velocity);
+
+    if (velocity == 0)
+    {
+      MIDI_PORT.write(0b10000000 + (CHANNEL-1));
+      MIDI_PORT.write(note_value);
+      MIDI_PORT.write(velocity);
+    }
+    else
+    {
+      MIDI_PORT.write(0b10010000 + (CHANNEL-1));
+      MIDI_PORT.write(note_value);
+      MIDI_PORT.write(velocity);
+    }
   }
+#endif
 
   // Sleep to not generate debug or MIDI messages too often
   delay(INTERVAL);
