@@ -61,6 +61,8 @@ const unsigned char note_keys[NOTES] =
   };
 const unsigned char note_values[NOTES] =
   {60, 62, 64, 77, 78, 79, 81, 82, 83, 72, 74, 76};
+unsigned char last_note = 0; // Last note that is playing, so it can be stopped
+int last_velocity = 0;
 
 // Array of the holes/keys/sensors which simulate holes on a real flute
 const unsigned char recv_pins[KEYS] = {RECV_PIN0, RECV_PIN1, RECV_PIN2, RECV_PIN3, RECV_PIN4, RECV_PIN5, RECV_PIN6, RECV_PIN7};
@@ -68,7 +70,7 @@ CapacitiveSensor *keys[KEYS];
 bool key_touched[KEYS];
 
 // Some global variables
-float old_air;
+float old_air = 0;
 
 /**
  * Arduino setup function to initialize everything
@@ -92,7 +94,6 @@ void setup()
     keys[i] = new CapacitiveSensor(SEND_PIN, recv_pins[i]);
     //keys[i]->set_CS_AutocaL_Millis(0xFFFFFFFF); // autocalibrate off
   }
-  old_air = analogRead(AIR_PIN);
 }
 
 /**
@@ -116,26 +117,20 @@ void loop()
     msg = msg + " ";
     msg = msg + key_value;
   }
-  log(msg);
 
-  // Calculate value of air flowing, mapping it to MIDI velocity range
-  // (0-127)
   float air_value = (float)analogRead(AIR_PIN);
-  air_value = air_value * AIR_MULTIPLIER + AIR_OFFSET;
-  if (air_value < 0) air_value = 0;
-  if (air_value > 127) air_value = 127;
   
-  msg = "Air: ";
+  msg = msg + " Air: ";
   msg = msg + air_value;
   log(msg);
 
+  // Calculate value of air flowing, mapping it to MIDI velocity
+  air_value = air_value * AIR_MULTIPLIER + AIR_OFFSET;
+  
   // Determine if the air value changed significantly enough to generate
   // a new MIDI message
   bool air_changed = false;
-  if (abs(air_value-old_air)>AIR_TRESHOLD)
-  {
-    air_changed = true;
-  }
+  if (abs(air_value-old_air)>AIR_TRESHOLD) air_changed = true;
   old_air = air_value;
 
   // Determine note based on key combination
@@ -150,7 +145,7 @@ void loop()
     if (note_keys[i] == keys_value)
     {
       note_value = note_values[i];
-      String msg = "Key combination";
+      String msg = "Key combination ";
       msg = msg + keys_value;
       msg = msg + " matched to note ";
       msg = msg + note_value;
@@ -159,40 +154,84 @@ void loop()
     }
   }
 
-  // Generate a note update on MIDI channel 1 if air value changed enough
+  // Generate a note update on MIDI if air value changed enough
   // or the keys have changed and are detected to be a note.
-#ifdef MIDI
-  if ((air_changed || keys_changed))
+  if (air_changed || keys_changed)
   {
-    log("Sending note");
-    
-    unsigned char velocity = (unsigned char)air_value;
-    
     // If we have no air sensor, emulate full velocity
 #ifdef EMULATE_AIR
-      velocity = 127;
+      air_value = 127;
 #endif
 
-    // No velocity if no note
-    if (note_value == 0) velocity = 0;
-
-    if (velocity == 0)
-    {
-      MIDI_PORT.write(0b10000000 + (CHANNEL-1));
-      MIDI_PORT.write(note_value);
-      MIDI_PORT.write(velocity);
-    }
-    else
-    {
-      MIDI_PORT.write(0b10010000 + (CHANNEL-1));
-      MIDI_PORT.write(note_value);
-      MIDI_PORT.write(velocity);
-    }
+    play_note(note_value, air_value);
   }
-#endif
 
   // Sleep to not generate debug or MIDI messages too often
   delay(INTERVAL);
+}
+
+/**
+ * Stop note that is currently playing (if any)
+ */
+void stop_note()
+{
+  if (last_note <= 0) return;
+  
+  String msg = "Stopping note ";
+  msg = msg + last_note;
+  log(msg);
+  
+#ifdef MIDI
+  MIDI_PORT.write(0b10000000 | (CHANNEL - 1));
+  MIDI_PORT.write(last_note);
+  MIDI_PORT.write(0);
+#endif
+  last_note = 0;
+}
+
+/**
+ * Play a note, stopping old note first (if playing)
+ */
+void play_note(unsigned char note_value, int velocity)
+{
+  if (note_value != last_note) stop_note();
+  
+  if (note_value == 0) return;
+  if (velocity < 0) velocity = 0;
+  if (velocity > 127) velocity = 127;
+
+  if ((note_value == last_note) && (velocity != last_velocity))
+  {
+    String msg = "Changing velocity of note ";
+    msg = msg + note_value;
+    msg = msg + " to ";
+    msg = msg + velocity;
+    log(msg);
+  
+#ifdef MIDI
+    MIDI_PORT.write(0b10100000 | (CHANNEL - 1));
+    MIDI_PORT.write(note_value);
+    MIDI_PORT.write(velocity);
+#endif
+  }
+  else
+  if ((note_value != last_note) && (velocity > 0))
+  {
+    String msg = "Playing note ";
+    msg = msg + note_value;
+    msg = msg + " with velocity ";
+    msg = msg + velocity;
+    log(msg);
+
+#ifdef MIDI
+    MIDI_PORT.write(0b10010000 | (CHANNEL - 1));
+    MIDI_PORT.write(note_value);
+    MIDI_PORT.write(velocity);
+#endif
+  }
+  
+  last_note = note_value;
+  last_velocity = velocity;
 }
 
 /**
