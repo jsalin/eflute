@@ -21,14 +21,16 @@
 #define MIDI_PORT Serial
 #define DEBUG_BPS 115200      // Baud rate in debug mode
 #define MIDI_BPS 115200       // Baud rate in MIDI mode (31250 if real MIDI)
-#define CAP_SAMPLES 100        // How many samples to take per key per check (30)
-#define INTERVAL 100          // Execute main loop this often (ms)
+#define CAP_SAMPLES 30        // How many samples to take per key per check (30)
+#define INTERVAL 1            // Execute main loop this often (ms)
 #define AIR_PIN 14            // Pin for air flow sensor (A0)
-#define AIR_MULTIPLIER 0.5f   // Multiply air flow value (to map to midi velocity)
-#define AIR_OFFSET -256       // Air flow value offset (to map to midi velocity)
-#define AIR_TRESHOLD 5        // How much the midi velocity has to change to send a update
+#define AIR_TRESHOLD 1        // How much the air value has to exceed minimum to be considered
+#define AIR_MULTIPLIER 4      // To make reasonable blowing to result in max (127) velocity
+//#define ALLOW_INHALING 1      // Should inhaling also generate a note
 #define KEYS 8                // How many keys the instrument has
-#define SEND_PIN 2            // Pin for sending a capacitive pulse (D2)
+#define SEND_PIN0 2           // Pin for sending a capacitive pulse (D2)
+#define SEND_PIN1 11          // Another pin for sending a capacitive pulse (D11)
+#define SEND_PIN2 12          // Third pin for sending a capacitive pulse (D12)
 #define RECV_PIN0 3           // Receive pins (D3 to D10)
 #define RECV_PIN1 4
 #define RECV_PIN2 5
@@ -37,12 +39,11 @@
 #define RECV_PIN5 8
 #define RECV_PIN6 9
 #define RECV_PIN7 10
-#define KEY_TRESHOLD 10       // Values over this are considered a touching of sensor
-#define DEBUG 0               // Define when wanting to debug
-//#define MIDI 1                // Define when wanting to use as midi device
-#define EMULATE_AIR 1         // Always full velocity (no air sensor, but test the keys)
+#define KEY_TRESHOLD 20       // Values over this are considered a touching of sensor
+//#define DEBUG 1               // Define when wanting to debug
+#define MIDI 1                // Define when wanting to use as midi device
 #define NOTES 12              // How many key combinations (notes) are available
-#define CHANNEL 3             // MIDI channel to use (1 to 16)
+#define CHANNEL 1             // MIDI channel to use (1 to 16)
 
 const unsigned char note_keys[NOTES] =
   {
@@ -65,12 +66,20 @@ unsigned char last_note = 0; // Last note that is playing, so it can be stopped
 int last_velocity = 0;
 
 // Array of the holes/keys/sensors which simulate holes on a real flute
-const unsigned char recv_pins[KEYS] = {RECV_PIN0, RECV_PIN1, RECV_PIN2, RECV_PIN3, RECV_PIN4, RECV_PIN5, RECV_PIN6, RECV_PIN7};
+// Change based on what your wiring happens to be!
+//const unsigned char recv_pins[KEYS] = {RECV_PIN0, RECV_PIN1, RECV_PIN2, RECV_PIN3, RECV_PIN4, RECV_PIN5, RECV_PIN6, RECV_PIN7};
+//const unsigned char send_pins[KEYS] = {SEND_PIN0, SEND_PIN0, SEND_PIN0, SEND_PIN0, SEND_PIN1, SEND_PIN1, SEND_PIN2, SEND_PIN2};
+const unsigned char recv_pins[KEYS] = {RECV_PIN3, RECV_PIN2, RECV_PIN1, RECV_PIN0, RECV_PIN7, RECV_PIN5, RECV_PIN6, RECV_PIN4};
+const unsigned char send_pins[KEYS] = {SEND_PIN0, SEND_PIN0, SEND_PIN0, SEND_PIN0, SEND_PIN2, SEND_PIN1, SEND_PIN2, SEND_PIN1};
+long key_cal[KEYS]; // Calibration values
 CapacitiveSensor *keys[KEYS];
 bool key_touched[KEYS];
 
 // Some global variables
-float old_air = 0;
+int old_air = 0;          // To see if air value is changing
+int min_air = 0;          // Air calibration
+String global_msg = "";   // For logging
+unsigned long last_ms= 0;
 
 /**
  * Arduino setup function to initialize everything
@@ -87,13 +96,44 @@ void setup()
   MIDI_PORT.begin(MIDI_BPS);
 #endif
 
-  // Set up sensors and initial values
+  // Set up sensors and calibration values
   for (unsigned char i=0; i<KEYS; i++)
   {
     key_touched[i] = false;
-    keys[i] = new CapacitiveSensor(SEND_PIN, recv_pins[i]);
-    //keys[i]->set_CS_AutocaL_Millis(0xFFFFFFFF); // autocalibrate off
+    keys[i] = new CapacitiveSensor(send_pins[i], recv_pins[i]);
+    keys[i]->set_CS_AutocaL_Millis(0xFFFFFFFF); // Autocalibrate off
+    key_cal[i] = 0;
   }
+
+  for (int j=0; j<10; j++)
+  {
+    for (unsigned char i=0; i<KEYS; i++)
+    {
+      long value = keys[i]->capacitiveSensor(CAP_SAMPLES);
+      if (value > key_cal[i]) key_cal[i] = value;
+    }
+    delay(50);
+  }
+  log("Keys calibrated");
+
+  calibrate_air();
+}
+
+/**
+ * Calibrate air sensor, finding base level
+ */
+void calibrate_air()
+{
+  min_air = 0;
+  for (int i=0; i<10; i++)
+  {
+    int value = analogRead(AIR_PIN);
+    if (value > min_air) min_air = value;
+    delay(50);
+  }
+  String msg = "Air sensor calibrated with base level value of ";
+  msg = msg + min_air;
+  log(msg);
 }
 
 /**
@@ -101,36 +141,44 @@ void setup()
  */
 void loop()                    
 {
+  String sensor_msg = "Keys:";
+  String finger_msg = "[";
+  String other_msg = "";
+  global_msg = "";
+  
   // Get values of all capacitive keys
-  String msg = "Keys:";
   bool keys_changed = false;
   for (unsigned char i=0; i<KEYS; i++)
   {
-    long key_value = 0;
-    key_value = keys[i]->capacitiveSensor(CAP_SAMPLES);
+    long key_value = keys[i]->capacitiveSensor(CAP_SAMPLES) - key_cal[i];
     bool touched = (key_value > KEY_TRESHOLD);
     if (touched != key_touched[i])
     {
       keys_changed = true;
       key_touched[i] = touched;
     }
-    msg = msg + " ";
-    msg = msg + key_value;
+    sensor_msg += " ";
+    sensor_msg += key_value;
+    if (touched) finger_msg += "O"; else finger_msg += ".";
   }
+  finger_msg += "] ";
 
-  float air_value = (float)analogRead(AIR_PIN);
+  int air_value = analogRead(AIR_PIN) - min_air; // get calibrated air value
+#ifdef ALLOW_INHALING
+  air_value = abs(air_value); // allow inhaling by turning it positive value
+#endif
+  air_value -= AIR_TRESHOLD; // eliminate noise by a treshold level
+  if (air_value < 0) air_value = 0;
+  air_value = air_value * AIR_MULTIPLIER; // amplify the value to midi velocity levels
+  if (air_value > 127) air_value = 127; // don't go beyond the level
   
-  msg = msg + " Air: ";
-  msg = msg + air_value;
-  log(msg);
-
-  // Calculate value of air flowing, mapping it to MIDI velocity
-  air_value = air_value * AIR_MULTIPLIER + AIR_OFFSET;
+  sensor_msg += " Air: ";
+  sensor_msg += air_value;
   
   // Determine if the air value changed significantly enough to generate
   // a new MIDI message
   bool air_changed = false;
-  if (abs(air_value-old_air)>AIR_TRESHOLD) air_changed = true;
+  if (abs(air_value - old_air) > 0) air_changed = true;
   old_air = air_value;
 
   // Determine note based on key combination
@@ -145,11 +193,10 @@ void loop()
     if (note_keys[i] == keys_value)
     {
       note_value = note_values[i];
-      String msg = "Key combination ";
-      msg = msg + keys_value;
-      msg = msg + " matched to note ";
-      msg = msg + note_value;
-      log(msg);
+      other_msg += " Keys ";
+      other_msg += keys_value;
+      other_msg += " matched note ";
+      other_msg += note_value;
       break;
     }
   }
@@ -158,16 +205,23 @@ void loop()
   // or the keys have changed and are detected to be a note.
   if (air_changed || keys_changed)
   {
-    // If we have no air sensor, emulate full velocity
-#ifdef EMULATE_AIR
-      air_value = 127;
-#endif
-
     play_note(note_value, air_value);
   }
 
+  String msg = finger_msg;
+  msg += sensor_msg;
+  msg += other_msg;
+  msg += global_msg;
+  log(msg);
+
   // Sleep to not generate debug or MIDI messages too often
-  delay(INTERVAL);
+  unsigned long ms = 0;
+  do
+  {
+    ms = millis();
+  }
+  while (ms - last_ms < INTERVAL);
+  last_ms = ms;
 }
 
 /**
@@ -177,9 +231,8 @@ void stop_note()
 {
   if (last_note <= 0) return;
   
-  String msg = "Stopping note ";
-  msg = msg + last_note;
-  log(msg);
+  global_msg += " STOP ";
+  global_msg += last_note;
   
 #ifdef MIDI
   MIDI_PORT.write(0b10000000 | (CHANNEL - 1));
@@ -194,44 +247,47 @@ void stop_note()
  */
 void play_note(unsigned char note_value, int velocity)
 {
+  if (velocity <= 0)
+  {
+    stop_note();
+    return;
+  }
   if (note_value != last_note) stop_note();
   
   if (note_value == 0) return;
-  if (velocity < 0) velocity = 0;
-  if (velocity > 127) velocity = 127;
 
   if ((note_value == last_note) && (velocity != last_velocity))
   {
-    String msg = "Changing velocity of note ";
-    msg = msg + note_value;
-    msg = msg + " to ";
-    msg = msg + velocity;
-    log(msg);
+    global_msg += " CHANGE ";
+    global_msg += note_value;
+    global_msg += "/";
+    global_msg += velocity;
   
 #ifdef MIDI
     MIDI_PORT.write(0b10100000 | (CHANNEL - 1));
     MIDI_PORT.write(note_value);
     MIDI_PORT.write(velocity);
 #endif
+
+    last_velocity = velocity;
   }
   else
   if ((note_value != last_note) && (velocity > 0))
   {
-    String msg = "Playing note ";
-    msg = msg + note_value;
-    msg = msg + " with velocity ";
-    msg = msg + velocity;
-    log(msg);
+    global_msg += " START ";
+    global_msg += note_value;
+    global_msg += "/";
+    global_msg += velocity;
 
 #ifdef MIDI
     MIDI_PORT.write(0b10010000 | (CHANNEL - 1));
     MIDI_PORT.write(note_value);
     MIDI_PORT.write(velocity);
 #endif
-  }
   
-  last_note = note_value;
-  last_velocity = velocity;
+    last_note = note_value;
+    last_velocity = velocity;
+  }
 }
 
 /**
