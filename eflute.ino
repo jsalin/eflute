@@ -24,7 +24,7 @@
 #define CAP_SAMPLES 30        // How many samples to take per key per check (30)
 #define INTERVAL 1            // Execute main loop this often (ms)
 #define AIR_PIN 14            // Pin for air flow sensor (A0)
-#define AIR_TRESHOLD 1        // How much the air value has to exceed minimum to be considered
+#define AIR_TRESHOLD 4        // How much the air value has to exceed minimum to be considered
 #define AIR_MULTIPLIER 4      // To make reasonable blowing to result in max (127) velocity
 //#define ALLOW_INHALING 1      // Should inhaling also generate a note
 #define KEYS 8                // How many keys the instrument has
@@ -42,26 +42,39 @@
 #define KEY_TRESHOLD 20       // Values over this are considered a touching of sensor
 //#define DEBUG 1               // Define when wanting to debug
 #define MIDI 1                // Define when wanting to use as midi device
-#define NOTES 12              // How many key combinations (notes) are available
+#define NOTES 22              // How many key combinations (notes) are available
 #define CHANNEL 1             // MIDI channel to use (1 to 16)
+#define ALWAYS_MAX_VELOCITY 1 // Always max velocity. Good with some synths like Yamaha XG.
+#define KEEP_PLAYING 1        // Keep playing a note even if combination changes to unknown.
+                              // In this case stopping air flow stops the note.
 
 const unsigned char note_keys[NOTES] =
   {
-  0b11111111, // Low C
-  0b11111110, // Low D
-  0b11111100, // Low E
-  0b11111010, // F
-  0b11110110, // F#
-  0b11110000, // G
-  0b11100000, // A
-  0b11010000, // Bb (H or A#)
-  0b11000000, // B
-  0b10100000, // C
-  0b00100000, // D
-  0b01111100  // E
+  0b11111111, // Low C (octave 5)
+  0b11111110, // Low D (octave 5)
+  0b11111100, // Low E (octave 5)
+  0b11111011, // Low F (octave 5)
+  0b11111000, // Low F also (octave 5)
+  0b11110110, // Low F# (octave 5)
+  0b11110000, // Low G (octave 5)
+  0b11100000, // Low A (octave 5)
+  0b11011000, // Low Bb (H or A#) (octave 5)
+  0b11000000, // Low B (octave 5)
+  0b10100000, // C (octave 6)
+  0b00100000, // D (octave 6)
+  0b01111100, // E (octave 6)
+  0b11110001, // Low G (octave 5) (lowest hole covered as support)
+  0b11100001, // Low A (octave 5) (lowest hole covered as support)
+  0b11010001, // Low Bb (H or A#) (octave 5) (lowest hole covered as support)
+  0b11000001, // Low B (octave 5) (lowest hole covered as support)
+  0b10100001, // C (octave 6) (lowest hole covered as support)
+  0b00100001, // D (octave 6) (lowest hole covered as support)
+  0b01111101, // E (octave 6) (lowest hole covered as support)
+  0b01100000, // C#/Db (octave 6)
+  0b11101110, // Low G# (octave 5)
   };
 const unsigned char note_values[NOTES] =
-  {60, 62, 64, 77, 78, 79, 81, 82, 83, 72, 74, 76};
+  {60, 62, 64, 65, 65, 66, 67, 69, 70, 71, 72, 74, 76, 67, 69, 70, 71, 72, 74, 76, 73, 68};
 unsigned char last_note = 0; // Last note that is playing, so it can be stopped
 int last_velocity = 0;
 
@@ -76,10 +89,11 @@ CapacitiveSensor *keys[KEYS];
 bool key_touched[KEYS];
 
 // Some global variables
-int old_air = 0;          // To see if air value is changing
-int min_air = 0;          // Air calibration
-String global_msg = "";   // For logging
-unsigned long last_ms= 0;
+int old_air = 0;              // To see if air value is changing
+int min_air = 0;              // Air calibration
+String global_msg = "";       // For logging
+unsigned long last_ms= 0;     // For main loop to run at exact intervals
+unsigned char old_note_value; // Old note value, for use with KEEP_PLAYING
 
 /**
  * Arduino setup function to initialize everything
@@ -171,6 +185,9 @@ void loop()
   if (air_value < 0) air_value = 0;
   air_value = air_value * AIR_MULTIPLIER; // amplify the value to midi velocity levels
   if (air_value > 127) air_value = 127; // don't go beyond the level
+#ifdef ALWAYS_MAX_VELOCITY
+  if (air_value > 0) air_value = 127;
+#endif
   
   sensor_msg += " Air: ";
   sensor_msg += air_value;
@@ -200,6 +217,16 @@ void loop()
       break;
     }
   }
+#ifdef KEEP_PLAYING
+  // Unknown combination (note_value 0) does not register as changed.
+  // Instead keep using the old note_value.
+  if (note_value == 0) 
+  {
+    keys_changed = false;
+    note_value = old_note_value;
+  }
+  old_note_value = note_value;
+#endif
 
   // Generate a note update on MIDI if air value changed enough
   // or the keys have changed and are detected to be a note.

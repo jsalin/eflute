@@ -24,3 +24,5 @@ References that helped
 * http://www.thingiverse.com/thing:1090461
 * http://www.squeakysrecorderplayhouse.com/FingeringChart.htm
 * http://www.aliexpress.com/snapshot/7403717092.html?orderId=73379505997070
+* https://www.midi.org/specifications/item/table-1-summary-of-midi-message
+* http://www.instructables.com/id/What-is-MIDI/
